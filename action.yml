@@ -2,6 +2,9 @@ name: 'Upload an encrypted Build Artifact'
 description: 'Upload an encrypted build artifact that can be used by subsequent workflow steps'
 author: 'Verumex'
 inputs:
+  gpg_key:
+    description: A single or list of public GPG keys to use
+    required: true
   name:
     description: 'Artifact name'
     default: 'artifact'
@@ -65,35 +68,94 @@ outputs:
 runs:
   using: 'composite'
   steps:
+    - name: Import GPG keys
+      run: |
+        echo ${{ inputs.gpg_key }} | gpg --batch --import
+
     - name: Encrypt artifacts
+      shell: bash
       env:
         PGP_SECRET_SIGNING_PASSPHRASE: ${{ secrets.PGP_SECRET_SIGNING_PASSPHRASE }}
       run: |
-        # Support newlines
+
+        set -e
+
+        # From inputs
+        artifact_name="${{ inputs.name }}"
         paths="${{ inputs.path }}"
-        encrypted_directory="${{ runner.temp }}/encrypted_artifacts"
+        pgp_passphrase="${PGP_SECRET_SIGNING_PASSPHRASE}"
+        retention_days="${{ inputs.retention-days }}"
+        if_no_files_found="${{ inputs.if-no-files-found }}"
 
-        # Create directory for encrypted files
-        mkdir -p $encrypted_directory
+        # Create a temporary directory to hold files for the archive
+        archive_path="${{ runner.temp }}/${artifact_name}.tar"
 
-        # Process each line of the path input
-        echo "$paths" | while read path; do
-          if [[ $path == \!* ]]; then
-            # Skip excluded files
-            continue
-          fi
+        # Log the inputs
+        echo "Creating an archive from the following paths:"
+        echo "$paths"
 
-          # Encrypt each included file
-          for file in $(find $path -type f); do
-            gpg --symmetric --batch --passphrase "$PGP_SECRET_SIGNING_PASSPHRASE" --output "${encrypted_directory}/${file}.enc" "$file"
-            rm "$file"  # Remove original file
-          done
+        # Prepare include and exclude options for tar
+        include_paths=""
+        exclude_paths=""
+
+        # Read each line of the multiline path input
+        echo "$paths" | while read -r path; do
+            if [[ $path == \!* ]]; then
+                # Exclude paths starting with "!"
+                exclude_paths+=" --exclude=${path:1}"
+            else
+                # Include paths
+                include_paths+=" $path"
+            fi
         done
 
-    - name: Upload encrypted artifacts
-      uses: actions/upload-artifact@v4
-      with:
-        name: ${{ inputs.name }}
-        path: ${{ runner.temp }}/encrypted_artifacts/
-        retention-days: ${{ inputs.retention-days }}
-        if-no-files-found: ${{ inputs.if-no-files-found }}
+        # Create the archive using tar, applying exclusions
+        tar -cvf "$archive_path" $include_paths $exclude_paths
+
+        # Encrypt the archive with GPG
+        encrypted_archive_path="${archive_path}.gpg"
+        gpg --batch --yes --symmetric --passphrase "$pgp_passphrase" --output "$encrypted_archive_path" "$archive_path"
+
+        # Remove unencrypted archive to clean up
+        rm "$archive_path"
+
+        # Upload the encrypted archive using `actions/upload-artifact`
+        echo "Uploading encrypted archive as artifact: $artifact_name"
+        echo "::set-output name=archive-path::$encrypted_archive_path"
+
+        # Move the encrypted archive to the directory to be uploaded
+        mv "$encrypted_archive_path" .
+
+    # - name: Encrypt artifacts
+    #   shell: bash
+    #   env:
+    #     PGP_SECRET_SIGNING_PASSPHRASE: ${{ secrets.PGP_SECRET_SIGNING_PASSPHRASE }}
+    #   run: |
+    #     # Support newlines
+    #     paths="${{ inputs.path }}"
+    #     encrypted_directory="${{ runner.temp }}/encrypted_artifacts"
+    #
+    #     # Create directory for encrypted files
+    #     mkdir -p $encrypted_directory
+    #
+    #     # Process each line of the path input
+    #     echo "$paths" | while read path; do
+    #       if [[ $path == \!* ]]; then
+    #         # Skip excluded files
+    #         continue
+    #       fi
+    #
+    #       # Encrypt each included file
+    #       for file in $(find $path -type f); do
+    #         gpg --symmetric --batch --passphrase "$PGP_SECRET_SIGNING_PASSPHRASE" --output "${encrypted_directory}/${file}.enc" "$file"
+    #         rm "$file"  # Remove original file
+    #       done
+    #     done
+
+    # - name: Upload encrypted artifacts
+    #   uses: actions/upload-artifact@v4
+    #   with:
+    #     name: ${{ inputs.name }}
+    #     path: ${{ runner.temp }}/encrypted_artifacts/
+    #     retention-days: ${{ inputs.retention-days }}
+    #     if-no-files-found: ${{ inputs.if-no-files-found }}
